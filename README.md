@@ -113,16 +113,3 @@ All passwords: Password123!
 | reviews | 17 | Product reviews |
 | inventories | 40 | Stock levels |
 
-## Project Structure
-zimart/
-├── src/
-│   ├── config/         # MongoDB and Redis connections
-│   ├── controllers/    # Business logic
-│   ├── middleware/     # Auth, rate limiting, role check
-│   ├── models/         # Mongoose schemas
-│   ├── routes/         # Express routers
-│   └── index.js        # Entry point
-├── scripts/
-│   └── seed.js         # Database seeder
-├── .env.example
-└── package.json
