@@ -458,6 +458,26 @@ if (count > limit) {
 
 ---
 
+### 6.2 Redis Persistence Configuration
+
+ZiMart uses Redis Cloud which configures **RDB (Redis Database) persistence** by default. RDB creates point-in-time snapshots of the dataset at specified intervals, providing durability with minimal performance overhead compared to AOF (Append Only File).
+
+**Justification for RDB over AOF:**
+- ZiMart's Redis data (sessions, cache, leaderboard) is semi-ephemeral — losing a few minutes of data on crash is acceptable
+- RDB snapshots are compact and restore faster than AOF logs
+- AOF would add write overhead on every Redis operation, impacting rate limiting and cache performance
+
+### 6.3 Redis Eviction Policy
+
+Redis Cloud is configured with **`volatile-ttl`** eviction policy.
+
+**Justification:**
+- ZiMart sets TTL on all keys (sessions, cache, cart, rate limits)
+- `volatile-ttl` evicts keys with the shortest remaining TTL first when memory is full
+- This naturally removes the least relevant cached data first
+- Rate limit keys (60s TTL) expire before session keys (7 days TTL) — correct priority
+
+
 ## 7. Caching Strategy
 
 ### 7.1 Cache-Aside Pattern
