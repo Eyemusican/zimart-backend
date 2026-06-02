@@ -119,8 +119,8 @@ All passwords: Password123!
 | Collection  | Documents | Purpose                        |
 | ----------- | --------- | ------------------------------ |
 | users       | 10        | Customer/seller/admin accounts |
-| products    | 40        | Product catalog                |
+| products    | 50        | Product catalog                |
 | orders      | 20        | Order records                  |
 | categories  | 3         | Product categories             |
-| reviews     | 17        | Product reviews                |
-| inventories | 40        | Stock levels                   |
+| reviews     | 14        | Product reviews                |
+| inventories | 50        | Stock levels                   |
