@@ -1,9 +1,6 @@
 node_modules/
 .env
 
-# Screenshots
-screenshot/
-screenshots/
 
 # Password and sensitive files
 Password.md
