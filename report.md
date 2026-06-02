@@ -7,7 +7,7 @@
 - Rangjung Yeshi Norbu - 02230297
 - Youten Kinley Tenzin - 02230313
 
-**Module:** DBS302 — NoSQL Database Management  
+**Module:** DBS302: NoSQL Database Management  
 **Date:** June 2026  
 
 ---
@@ -32,7 +32,7 @@
 
 ## 1. Abstract
 
-ZiMart is a RESTful e-commerce backend built to demonstrate the practical application of polyglot persistence — the use of multiple specialised database technologies within a single system. The system pairs MongoDB Atlas, a distributed document-oriented database, with Redis Cloud, an in-memory data store, to serve distinct workloads efficiently. MongoDB handles durable, schema-flexible document storage across six collections (User, Product, Category, Order, Review, and Inventory), while Redis accelerates read-heavy paths through caching, manages short-lived session state, enforces rate limits, tracks trending products via sorted sets, and records recently viewed items via lists. The backend is implemented in Node.js with Express 5, exposes twenty-two REST endpoints across five routers, and enforces JWT-based authentication with Redis-backed session revocation. Advanced MongoDB features — compound indexes, full-text search, multi-document ACID transactions, and aggregation pipelines — are demonstrated through real product and order workflows. This report documents every design decision, data modelling trade-off, and non-functional requirement addressed by the system.
+ZiMart is a RESTful e-commerce backend built to demonstrate the practical application of polyglot persistence, meaning the use of multiple specialised database technologies within a single system. The system pairs MongoDB Atlas, a distributed document-oriented database, with Redis Cloud, an in-memory data store, to serve distinct workloads efficiently. MongoDB handles durable, schema-flexible document storage across six collections (User, Product, Category, Order, Review, and Inventory), while Redis accelerates read-heavy paths through caching, manages short-lived session state, enforces rate limits, tracks trending products via sorted sets, and records recently viewed items via lists. The backend is implemented in Node.js with Express 5, exposes twenty-two REST endpoints across five routers, and enforces JWT-based authentication with Redis-backed session revocation. Advanced MongoDB features, including compound indexes, full-text search, multi-document ACID transactions, and aggregation pipelines, are demonstrated through real product and order workflows. This report documents every design decision, data modelling trade-off, and non-functional requirement addressed by the system.
 
 ---
 
@@ -188,7 +188,7 @@ sequenceDiagram
 
 Node.js was selected for its event-driven, non-blocking I/O model, which is well suited to an API server that spends most of its time waiting on I/O from MongoDB and Redis rather than performing CPU-bound work. A single Node.js process can handle thousands of concurrent connections efficiently without spawning a thread per request, reducing memory overhead compared to thread-per-request server models [1].
 
-Express 5 was chosen as the HTTP framework for its minimal footprint, mature middleware ecosystem, and first-class async/await error propagation — a notable improvement over Express 4, where unhandled async rejections required explicit wrapping. The `next(err)` pattern used in ZiMart's controllers flows directly to a centralised error handler without additional boilerplate.
+Express 5 was chosen as the HTTP framework for its minimal footprint, mature middleware ecosystem, and first-class async/await error propagation, a notable improvement over Express 4, where unhandled async rejections required explicit wrapping. The `next(err)` pattern used in ZiMart's controllers flows directly to a centralised error handler without additional boilerplate.
 
 ### 3.2 MongoDB Atlas
 
@@ -239,11 +239,11 @@ The central trade-off in MongoDB data modelling is between embedding (denormalis
 | Category | `parentCategory` | Single-field | Tree traversal (find all children of a parent) |
 | Inventory | `stock` | Single-field | Low-stock threshold alert queries |
 
-![screenshot/mongodb-indexes-products.png](screenshot/mongodb-indexes-products.png)
+![alt text](screenshot/mongodb-indexes-products.png)
 
-![screenshot/mongodb-product-document.png](screenshot/mongodb-product-document.png)
+![alt text](screenshot/mongodb-product-document.png)
 
-![screenshot/mongodb-collections.png](screenshot/mongodb-collections.png)
+![alt text](screenshot/mongodb-collections.png)
 
 ---
 
@@ -327,7 +327,7 @@ The guard condition `{ stock: { $gte: item.quantity } }` in `findOneAndUpdate` i
 
 ZiMart connects to a MongoDB Atlas M0 cluster, which deploys a three-node replica set automatically. The primary node accepts all writes; the two secondary nodes replicate the oplog asynchronously and are eligible for election if the primary becomes unavailable. Atlas performs automatic failover in under 10 seconds, requiring no manual intervention [6]. The connection string includes the `appName=Cluster0` parameter, which appears in Atlas monitoring to identify this specific application's traffic.
 
-![screenshot/mongodb-replica-set.png](screenshot/mongodb-replica-set.png)
+![alt text](screenshot/mongodb-replica-set.png)
 
 
 ![alt text](screenshot/mongodb-indexes-products.png)
@@ -347,7 +347,7 @@ Redis's value proposition is not just speed but its collection of purpose-built 
 | `session:{userId}` | JWT token string | 7 days | `SET`, `GET`, `DEL` |
 | `product:{id}` | JSON-serialised product document | 1 hour | `SET EX`, `GET`, `DEL` |
 
-Strings are the simplest structure but serve two distinct roles. Session keys store the raw JWT for revocation verification on every authenticated request — `DEL session:{userId}` on logout immediately invalidates all active sessions for that user, something impossible with stateless JWT alone. Product cache keys store JSON-serialised MongoDB documents, enabling the cache-aside pattern described in Section 7.
+Strings are the simplest structure but serve two distinct roles. Session keys store the raw JWT for revocation verification on every authenticated request; `DEL session:{userId}` on logout immediately invalidates all active sessions for that user, something impossible with stateless JWT alone. Product cache keys store JSON-serialised MongoDB documents, enabling the cache-aside pattern described in Section 7.
 
 ```javascript
 // Store session with 7-day TTL
@@ -749,7 +749,7 @@ MongoDB's document-level locking ensures that two concurrent updates to the same
 
 **Problem:** If the cart is deleted inside the transaction and the transaction subsequently aborts, the cart is lost even though no order was placed. If it is deleted outside the transaction and the process crashes after commit but before the delete, the user retains a cart for an order that has already been placed.
 
-**Solution:** Cart deletion is performed outside and after the committed transaction (`await redis.del(cartKey)` after `session.commitTransaction()`). The worst-case outcome of a crash at this point is a stale cart in Redis that expires naturally after 7 days — a minor UX inconvenience, not a data integrity problem, because the order is durably committed in MongoDB.
+**Solution:** Cart deletion is performed outside and after the committed transaction (`await redis.del(cartKey)` after `session.commitTransaction()`). The worst-case outcome of a crash at this point is a stale cart in Redis that expires naturally after 7 days, a minor UX inconvenience and not a data integrity problem, because the order is durably committed in MongoDB.
 
 ---
 
@@ -809,4 +809,3 @@ Production observability currently relies on console logging. Integrating OpenTe
 
 ---
 
-*End of Report*
