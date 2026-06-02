@@ -4,6 +4,14 @@ const cors = require('cors');
 const helmet = require('helmet');
 const connectDB = require('./config/db');
 require('./config/redis');
+
+// Register all Mongoose models before any route handler references them
+require('./models/User');
+require('./models/Product');
+require('./models/Category');
+require('./models/Order');
+require('./models/Review');
+require('./models/Inventory');
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/product');
 const cartRoutes    = require('./routes/cart');

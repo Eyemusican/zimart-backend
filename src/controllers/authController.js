@@ -15,7 +15,7 @@ const storeSession = (userId, token) =>
   redis.set(`session:${userId}`, token, 'EX', SESSION_TTL);
 
 // POST /api/auth/register
-const register = async (req, res) => {
+const register = async (req, res, next) => {
   try {
     const { name, email, password, role } = req.body;
 
@@ -39,7 +39,7 @@ const register = async (req, res) => {
 
     res.status(201).json({ token, user });
   } catch (err) {
-    res.status(500).json({ message: 'Registration failed', error: err.message });
+    next(err);
   }
 };
 

@@ -131,6 +131,43 @@ const getProductById = async (req, res) => {
   }
 };
 
+// GET /api/products/trending
+const getTrendingProducts = async (req, res) => {
+  try {
+    // ZREVRANGE returns a flat array: [id, score, id, score, ...]
+    const raw = await redis.zrevrange('trending:products', 0, 9, 'WITHSCORES');
+
+    if (!raw.length) {
+      return res.json({ products: [] });
+    }
+
+    // Pair up members and scores: [[id, score], ...]
+    const pairs = [];
+    for (let i = 0; i < raw.length; i += 2) {
+      pairs.push({ id: raw[i], viewCount: Number(raw[i + 1]) });
+    }
+
+    const ids = pairs.map((p) => p.id);
+    const docs = await Product.find({ _id: { $in: ids }, isActive: true })
+      .populate('category', 'name slug')
+      .lean();
+
+    // Re-order docs to match the Redis ranking and attach viewCount
+    const scoreMap = Object.fromEntries(pairs.map((p) => [p.id, p.viewCount]));
+    const products = ids
+      .map((id) => {
+        const doc = docs.find((d) => d._id.toString() === id);
+        if (!doc) return null;
+        return { ...doc, viewCount: scoreMap[id] };
+      })
+      .filter(Boolean);
+
+    res.json({ products });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch trending products', error: err.message });
+  }
+};
+
 // PUT /api/products/:id
 const updateProduct = async (req, res) => {
   try {
@@ -186,6 +223,7 @@ module.exports = {
   createProduct,
   getProducts,
   getProductById,
+  getTrendingProducts,
   updateProduct,
   deleteProduct,
 };
