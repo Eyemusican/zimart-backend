@@ -5,7 +5,8 @@
 **Members:** 
 - Tenzin Namgay - 02230307 
 - Rangjung Yeshi Norbu - 02230297
-- Youten Kinley Tenzin - 02230313
+- Yonten Kinley Tenzin - 02230313
+- Khem Raj Ghalley - 02230286
 
 **Module:** DBS302: NoSQL Database Management  
 **Date:** June 2026  
