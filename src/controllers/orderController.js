@@ -1,15 +1,55 @@
 const mongoose = require('mongoose');
-const Order = require('../models/Order');
+const Order     = require('../models/Order');
 const Inventory = require('../models/Inventory');
-const redis = require('../config/redis');
+const Product   = require('../models/Product');
+const redis     = require('../config/redis');
 
 const cartKey = (userId) => `cart:${userId}`;
 
-// Valid forward-only status transitions. Cancellation/returns are separate flows.
 const STATUS_TRANSITIONS = {
   Placed:    'Confirmed',
   Confirmed: 'Shipped',
   Shipped:   'Delivered',
+};
+
+// Updates the monthly buyer and seller Redis sorted-set leaderboards.
+// Runs fire-and-forget after commitTransaction() so it never blocks the response
+// and a Redis failure cannot roll back an already-committed order.
+//
+// Buyer leaderboard  — key: leaderboard:buyers:{YYYY-MM}
+//   Score = cumulative order total spent by this user in the current month.
+//
+// Seller leaderboard — key: leaderboard:sellers:{YYYY-MM}
+//   Score = cumulative revenue earned by each seller from items in this order.
+//   Requires a Product lookup per item to resolve sellerId; acceptable as
+//   fire-and-forget since it runs outside the critical response path.
+const updateLeaderboards = async (userId, orderItems, totalAmount) => {
+  const period = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const TTL    = 35 * 24 * 60 * 60;                   // 35 days — outlasts the full month
+
+  // Buyer leaderboard
+  await redis.zincrby(`leaderboard:buyers:${period}`, totalAmount, userId.toString());
+  await redis.expire(`leaderboard:buyers:${period}`, TTL);
+
+  // Seller leaderboard — aggregate revenue per seller across all line items
+  const sellerRevenue = {};
+
+  for (const item of orderItems) {
+    const product = await Product.findById(item.productId).select('sellerId').lean();
+    if (!product?.sellerId) continue;
+    const sid = product.sellerId.toString();
+    sellerRevenue[sid] = (sellerRevenue[sid] || 0) + item.price * item.quantity;
+  }
+
+  if (Object.keys(sellerRevenue).length > 0) {
+    const sellerKey = `leaderboard:sellers:${period}`;
+    const pipeline  = redis.pipeline();
+    for (const [sellerId, revenue] of Object.entries(sellerRevenue)) {
+      pipeline.zincrby(sellerKey, revenue, sellerId);
+    }
+    pipeline.expire(sellerKey, TTL);
+    await pipeline.exec();
+  }
 };
 
 // POST /api/orders
@@ -19,10 +59,10 @@ const STATUS_TRANSITIONS = {
 // rolls back ALL inventory decrements already applied in this loop — no partial
 // fulfilments, no overselling.
 //
-// Redis cart clear happens OUTSIDE the transaction intentionally: Redis is not
-// part of the MongoDB replica-set protocol, so it cannot join the two-phase
-// commit. Clearing after commitTransaction() is safe — if the process dies
-// between commit and DEL the cart will expire via its 7-day TTL.
+// Redis cart clear and leaderboard updates happen OUTSIDE the transaction
+// intentionally: Redis is not part of the MongoDB replica-set protocol and cannot
+// join the two-phase commit. Clearing after commitTransaction() is safe — if the
+// process dies between commit and DEL the cart will expire via its 7-day TTL.
 const placeOrder = async (req, res) => {
   const { shippingAddress, paymentMethod } = req.body;
 
@@ -30,7 +70,6 @@ const placeOrder = async (req, res) => {
     return res.status(400).json({ message: 'shippingAddress and paymentMethod are required' });
   }
 
-  // Read cart before opening the session — Redis reads don't need a Mongo session.
   const cartData = await redis.hgetall(cartKey(req.user.id));
 
   if (!cartData || Object.keys(cartData).length === 0) {
@@ -50,10 +89,8 @@ const placeOrder = async (req, res) => {
     let   totalAmount = 0;
 
     for (const item of cartItems) {
-      // Atomic check-and-decrement in a single findOneAndUpdate:
-      // the { stock: { $gte: quantity } } filter acts as the guard —
-      // if stock is too low the update matches nothing and returns null,
-      // which we treat as an insufficient-stock signal.
+      // Atomic check-and-decrement: the { stock: { $gte: quantity } } filter acts
+      // as a guard — if stock is too low the update matches nothing and returns null.
       const inventory = await Inventory.findOneAndUpdate(
         { productId: item.productId, stock: { $gte: item.quantity } },
         { $inc: { stock: -item.quantity }, lastUpdated: new Date() },
@@ -61,7 +98,6 @@ const placeOrder = async (req, res) => {
       );
 
       if (!inventory) {
-        // Abort rolls back every $inc applied earlier in this loop.
         await session.abortTransaction();
         session.endSession();
         return res.status(400).json({
@@ -79,8 +115,6 @@ const placeOrder = async (req, res) => {
       totalAmount += item.price * item.quantity;
     }
 
-    // Order.create() inside a session requires the array form so Mongoose
-    // passes the session option to insertMany internally.
     const [order] = await Order.create(
       [
         {
@@ -98,8 +132,11 @@ const placeOrder = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // Clear cart post-commit. Safe to fire-and-forget — see comment above.
+    // Post-commit side-effects (non-blocking)
     await redis.del(cartKey(req.user.id));
+    updateLeaderboards(req.user.id, orderItems, Number(totalAmount.toFixed(2))).catch((err) =>
+      console.error('Leaderboard update failed:', err.message)
+    );
 
     res.status(201).json({ order });
   } catch (err) {
@@ -151,7 +188,6 @@ const getOrderById = async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    // Customers may only see their own orders; admins see all.
     if (req.user.role !== 'admin' && order.userId.toString() !== req.user.id) {
       return res.status(403).json({ message: 'Forbidden' });
     }
@@ -172,8 +208,6 @@ const updateOrderStatus = async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    // Enforce the linear progression: Placed → Confirmed → Shipped → Delivered.
-    // Prevents skipping steps or going backwards which would break fulfilment logic.
     const expected = STATUS_TRANSITIONS[order.status];
     if (!expected) {
       return res.status(400).json({

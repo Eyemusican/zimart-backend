@@ -7,23 +7,26 @@ const {
   clearCart,
   addToRecentlyViewed,
   getRecentlyViewed,
+  mergeGuestCart,
 } = require('../controllers/cartController');
-const { auth } = require('../middleware/auth');
+const { auth }        = require('../middleware/auth');
+const optionalAuth    = require('../middleware/optionalAuth');
 
 const router = express.Router();
 
-// All cart routes require authentication — carts are user-scoped
-router.use(auth);
+// Guest-compatible routes use optionalAuth — accepts Bearer token or X-Guest-Id header.
+// /api/cart/recent must be declared before /api/cart/:productId to prevent Express
+// from binding the literal string "recent" to the :productId param.
+router.get('/recent',        optionalAuth, getRecentlyViewed);
+router.post('/recent',       optionalAuth, addToRecentlyViewed);
 
-// /api/cart/recent must be declared before /api/cart/:productId so Express
-// does not treat the literal string "recent" as a productId param.
-router.get('/recent', getRecentlyViewed);
-router.post('/recent', addToRecentlyViewed);
+// POST /api/cart/merge is auth-only: the user must be logged in to own a target cart.
+router.post('/merge', auth, mergeGuestCart);
 
-router.get('/', getCart);
-router.post('/', addToCart);
-router.put('/:productId', updateCartItem);
-router.delete('/:productId', removeFromCart);
-router.delete('/', clearCart);
+router.get('/',              optionalAuth, getCart);
+router.post('/',             optionalAuth, addToCart);
+router.put('/:productId',    optionalAuth, updateCartItem);
+router.delete('/:productId', optionalAuth, removeFromCart);
+router.delete('/',           optionalAuth, clearCart);
 
 module.exports = router;
