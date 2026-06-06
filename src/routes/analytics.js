@@ -1,6 +1,7 @@
 const express = require('express');
 const {
   monthlySalesReport,
+  dailySalesReport,
   topProducts,
   lowStockAlert,
   mostViewedVsPurchased,
@@ -15,6 +16,7 @@ const router = express.Router();
 router.use(auth, roleCheck('admin'));
 
 router.get('/sales',                monthlySalesReport);
+router.get('/sales/daily',          dailySalesReport);
 router.get('/top-products',         topProducts);
 router.get('/low-stock',            lowStockAlert);
 router.get('/views-vs-purchases',   mostViewedVsPurchased);

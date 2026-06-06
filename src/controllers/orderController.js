@@ -6,10 +6,15 @@ const redis     = require('../config/redis');
 
 const cartKey = (userId) => `cart:${userId}`;
 
+// Each state maps to the set of valid next states.
+// Forward path: Placed → Confirmed → Shipped → Delivered
+// Cancellation: Placed or Confirmed can be cancelled (not after shipping)
+// Return: only a Delivered order can be returned
 const STATUS_TRANSITIONS = {
-  Placed:    'Confirmed',
-  Confirmed: 'Shipped',
-  Shipped:   'Delivered',
+  Placed:    ['Confirmed', 'Cancelled'],
+  Confirmed: ['Shipped',   'Cancelled'],
+  Shipped:   ['Delivered'],
+  Delivered: ['Returned'],
 };
 
 // Updates the monthly buyer and seller Redis sorted-set leaderboards.
@@ -208,15 +213,15 @@ const updateOrderStatus = async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    const expected = STATUS_TRANSITIONS[order.status];
-    if (!expected) {
+    const allowed = STATUS_TRANSITIONS[order.status];
+    if (!allowed) {
       return res.status(400).json({
         message: `Order is already in a terminal state: ${order.status}`,
       });
     }
-    if (status !== expected) {
+    if (!allowed.includes(status)) {
       return res.status(400).json({
-        message: `Invalid transition. "${order.status}" can only move to "${expected}"`,
+        message: `Invalid transition. "${order.status}" can move to: ${allowed.join(', ')}`,
       });
     }
 
@@ -229,4 +234,34 @@ const updateOrderStatus = async (req, res) => {
   }
 };
 
-module.exports = { placeOrder, getOrders, getOrderById, updateOrderStatus };
+// PUT /api/orders/:id/cancel  (customer — own orders only)
+// Customers can cancel their own order while it hasn't shipped yet.
+const cancelOrder = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    if (order.userId.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const allowed = STATUS_TRANSITIONS[order.status];
+    if (!allowed?.includes('Cancelled')) {
+      return res.status(400).json({
+        message: `Cannot cancel an order with status "${order.status}"`,
+      });
+    }
+
+    order.status = 'Cancelled';
+    await order.save();
+
+    res.json({ order });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to cancel order', error: err.message });
+  }
+};
+
+module.exports = { placeOrder, getOrders, getOrderById, updateOrderStatus, cancelOrder };

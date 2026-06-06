@@ -12,11 +12,12 @@ require('./models/Category');
 require('./models/Order');
 require('./models/Review');
 require('./models/Inventory');
-const authRoutes = require('./routes/auth');
-const productRoutes = require('./routes/product');
-const cartRoutes    = require('./routes/cart');
-const orderRoutes     = require('./routes/order');
+const authRoutes     = require('./routes/auth');
+const productRoutes  = require('./routes/product');
+const cartRoutes     = require('./routes/cart');
+const orderRoutes    = require('./routes/order');
 const analyticsRoutes = require('./routes/analytics');
+const reviewRoutes   = require('./routes/review');
 
 const app = express();
 
@@ -42,11 +43,12 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use('/api/auth', authRoutes);
-app.use('/api/products', productRoutes);
-app.use('/api/cart',     cartRoutes);
-app.use('/api/orders',    orderRoutes);
-app.use('/api/analytics', analyticsRoutes);
+app.use('/api/auth',                         authRoutes);
+app.use('/api/products',                     productRoutes);
+app.use('/api/products/:productId/reviews',  reviewRoutes);
+app.use('/api/cart',                         cartRoutes);
+app.use('/api/orders',                       orderRoutes);
+app.use('/api/analytics',                    analyticsRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'ZiMart API is running' });

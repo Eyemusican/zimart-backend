@@ -54,6 +54,75 @@ const monthlySalesReport = async (req, res) => {
   }
 };
 
+// GET /api/analytics/sales/daily?month=YYYY-MM
+//
+// Pipeline mirrors monthlySalesReport but groups by calendar day within the
+// requested month (defaults to current month). Adding $dayOfMonth to the _id
+// produces one bucket per day so operators can spot daily revenue spikes or
+// quiet periods within a month without exporting the raw order collection.
+const dailySalesReport = async (req, res) => {
+  try {
+    const month = req.query.month || new Date().toISOString().slice(0, 7);
+
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ message: 'month must be in YYYY-MM format' });
+    }
+
+    const [year, mo] = month.split('-').map(Number);
+    const start = new Date(year, mo - 1, 1);
+    const end   = new Date(year, mo,     1); // first day of next month (exclusive)
+
+    const report = await Order.aggregate([
+      { $match: { status: 'Delivered', createdAt: { $gte: start, $lt: end } } },
+      {
+        $group: {
+          _id: {
+            year:  { $year:       '$createdAt' },
+            month: { $month:      '$createdAt' },
+            day:   { $dayOfMonth: '$createdAt' },
+          },
+          totalRevenue:  { $sum: '$totalAmount' },
+          orderCount:    { $sum: 1 },
+          avgOrderValue: { $avg: '$totalAmount' },
+        },
+      },
+      {
+        $addFields: {
+          date: {
+            $concat: [
+              { $toString: '$_id.year' },
+              '-',
+              {
+                $cond: {
+                  if:   { $lt: ['$_id.month', 10] },
+                  then: { $concat: ['0', { $toString: '$_id.month' }] },
+                  else: { $toString: '$_id.month' },
+                },
+              },
+              '-',
+              {
+                $cond: {
+                  if:   { $lt: ['$_id.day', 10] },
+                  then: { $concat: ['0', { $toString: '$_id.day' }] },
+                  else: { $toString: '$_id.day' },
+                },
+              },
+            ],
+          },
+          totalRevenue:  { $round: ['$totalRevenue',  2] },
+          avgOrderValue: { $round: ['$avgOrderValue', 2] },
+        },
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
+      { $project: { _id: 0, date: 1, totalRevenue: 1, orderCount: 1, avgOrderValue: 1 } },
+    ]);
+
+    res.json({ month, report });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to generate daily sales report', error: err.message });
+  }
+};
+
 // GET /api/analytics/top-products
 //
 // Pipeline:
@@ -263,6 +332,7 @@ const topSellers = async (req, res) => {
 
 module.exports = {
   monthlySalesReport,
+  dailySalesReport,
   topProducts,
   lowStockAlert,
   mostViewedVsPurchased,
