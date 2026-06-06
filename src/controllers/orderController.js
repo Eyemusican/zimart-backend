@@ -93,7 +93,6 @@ const placeOrder = async (req, res) => {
   // within the transaction, satisfying full ACID isolation.
   session.startTransaction({
     writeConcern: { w: 'majority', j: true },
-    readConcern: { level: 'snapshot' },
   });
 
   try {
@@ -106,7 +105,7 @@ const placeOrder = async (req, res) => {
       const inventory = await Inventory.findOneAndUpdate(
         { productId: item.productId, stock: { $gte: item.quantity } },
         { $inc: { stock: -item.quantity }, lastUpdated: new Date() },
-        { session, new: true }
+        { session, returnDocument: 'after' }
       );
 
       if (!inventory) {

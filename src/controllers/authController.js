@@ -127,7 +127,7 @@ const addToWishlist = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { $addToSet: { wishlist: req.params.productId } },
-      { new: true }
+      { returnDocument: 'after' }
     );
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json({ wishlist: user.wishlist });
@@ -142,7 +142,7 @@ const removeFromWishlist = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { $pull: { wishlist: req.params.productId } },
-      { new: true }
+      { returnDocument: 'after' }
     );
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json({ wishlist: user.wishlist });

@@ -1,4 +1,6 @@
+const mongoose = require('mongoose');
 const Product = require('../models/Product');
+const Category = require('../models/Category');
 const Inventory = require('../models/Inventory');
 const redis = require('../config/redis');
 
@@ -48,13 +50,35 @@ const getProducts = async (req, res) => {
       minPrice,
       maxPrice,
       search,
-      sort = 'createdAt',
+      sort = 'newest',
       order = 'desc',
     } = req.query;
 
+    // Translate frontend sort aliases to MongoDB field + direction pairs
+    const SORT_MAP = {
+      newest:     { field: 'createdAt',      dir: -1 },
+      price_asc:  { field: 'price',          dir:  1 },
+      price_desc: { field: 'price',          dir: -1 },
+      rating:     { field: 'ratings.average',dir: -1 },
+      trending:   { field: 'createdAt',      dir: -1 }, // fallback; real trending uses /trending
+    };
+    const sortAlias = SORT_MAP[sort];
+    const sortField = sortAlias ? sortAlias.field : sort;
+    const sortDir   = sortAlias ? sortAlias.dir   : (order === 'asc' ? 1 : -1);
+
     const filter = { isActive: true };
 
-    if (category) filter.category = category;
+    if (category) {
+      // category param may be a name string ("Electronics") or an ObjectId string.
+      // If it's not a valid ObjectId, resolve it to one via the Category collection.
+      if (mongoose.Types.ObjectId.isValid(category)) {
+        filter.category = category;
+      } else {
+        const cat = await Category.findOne({ name: new RegExp(`^${category}$`, 'i') }).lean();
+        if (cat) filter.category = cat._id;
+        else filter.category = null; // no match → return empty
+      }
+    }
 
     if (minPrice !== undefined || maxPrice !== undefined) {
       filter.price = {};
@@ -73,8 +97,8 @@ const getProducts = async (req, res) => {
     // When a text search is active, sort by relevance score first then fall back
     // to the requested sort field. Without this, text results are unordered.
     const sortObj = search
-      ? { score: { $meta: 'textScore' }, [sort]: order === 'desc' ? -1 : 1 }
-      : { [sort]: order === 'desc' ? -1 : 1 };
+      ? { score: { $meta: 'textScore' }, [sortField]: sortDir }
+      : { [sortField]: sortDir };
 
     const projection = search ? { score: { $meta: 'textScore' } } : {};
 
@@ -141,7 +165,14 @@ const getTrendingProducts = async (req, res) => {
     const raw = await redis.zrevrange('trending:products', 0, 9, 'WITHSCORES');
 
     if (!raw.length) {
-      return res.json({ products: [] });
+      // Cold-start fallback: Redis sorted set is empty (no views yet).
+      // Return top-rated products so the homepage trending section is never blank.
+      const fallback = await Product.find({ isActive: true })
+        .sort({ 'ratings.average': -1, createdAt: -1 })
+        .limit(10)
+        .populate('category', 'name slug')
+        .lean();
+      return res.json({ products: fallback });
     }
 
     // Pair up members and scores: [[id, score], ...]
@@ -181,7 +212,7 @@ const updateProduct = async (req, res) => {
     if (req.user.role === 'seller') filter.sellerId = req.user.id;
 
     const product = await Product.findOneAndUpdate(filter, req.body, {
-      new: true,
+      returnDocument: 'after',
       runValidators: true,
     });
 
@@ -206,7 +237,7 @@ const deleteProduct = async (req, res) => {
     const product = await Product.findByIdAndUpdate(
       id,
       { isActive: false },
-      { new: true }
+      { returnDocument: 'after' }
     );
 
     if (!product) {
