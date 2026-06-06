@@ -7,6 +7,7 @@ const {
   mostViewedVsPurchased,
   topBuyers,
   topSellers,
+  systemStats,
 } = require('../controllers/analyticsController');
 const { auth } = require('../middleware/auth');
 const roleCheck = require('../middleware/roleCheck');
@@ -22,5 +23,6 @@ router.get('/low-stock',            lowStockAlert);
 router.get('/views-vs-purchases',   mostViewedVsPurchased);
 router.get('/leaderboard/buyers',   topBuyers);
 router.get('/leaderboard/sellers',  topSellers);
+router.get('/system-stats',         systemStats);
 
 module.exports = router;

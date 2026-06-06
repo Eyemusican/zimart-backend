@@ -1,3 +1,4 @@
+const mongoose  = require('mongoose');
 const Order     = require('../models/Order');
 const Inventory = require('../models/Inventory');
 const User      = require('../models/User');
@@ -330,6 +331,56 @@ const topSellers = async (req, res) => {
   }
 };
 
+// GET /api/analytics/system-stats
+//
+// Observability endpoint (NFR7): exposes Redis INFO and MongoDB connection stats
+// so operators can monitor cache hit rates, memory usage, and DB health without
+// needing direct CLI access.
+const systemStats = async (req, res) => {
+  try {
+    // Parse Redis INFO into key-value pairs
+    const infoRaw = await redis.info();
+    const redisInfo = Object.fromEntries(
+      infoRaw
+        .split('\r\n')
+        .filter((line) => line && !line.startsWith('#'))
+        .map((line) => line.split(':'))
+        .filter((parts) => parts.length === 2)
+        .map(([k, v]) => [k.trim(), v.trim()])
+    );
+
+    const keyStats = {
+      used_memory_human:         redisInfo.used_memory_human,
+      connected_clients:         redisInfo.connected_clients,
+      keyspace_hits:             redisInfo.keyspace_hits,
+      keyspace_misses:           redisInfo.keyspace_misses,
+      instantaneous_ops_per_sec: redisInfo.instantaneous_ops_per_sec,
+      uptime_in_seconds:         redisInfo.uptime_in_seconds,
+      redis_version:             redisInfo.redis_version,
+      maxmemory_policy:          redisInfo.maxmemory_policy,
+      rdb_last_save_time:        redisInfo.rdb_last_save_time,
+      aof_enabled:               redisInfo.aof_enabled,
+    };
+
+    const hits   = Number(redisInfo.keyspace_hits   || 0);
+    const misses = Number(redisInfo.keyspace_misses || 0);
+    const total  = hits + misses;
+    keyStats.cache_hit_ratio = total > 0 ? `${((hits / total) * 100).toFixed(2)}%` : 'N/A';
+
+    // MongoDB connection state
+    const db = mongoose.connection;
+    const mongoStats = {
+      state: db.readyState === 1 ? 'connected' : 'disconnected',
+      host:  db.host,
+      name:  db.name,
+    };
+
+    res.json({ redis: keyStats, mongodb: mongoStats });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch system stats', error: err.message });
+  }
+};
+
 module.exports = {
   monthlySalesReport,
   dailySalesReport,
@@ -338,4 +389,5 @@ module.exports = {
   mostViewedVsPurchased,
   topBuyers,
   topSellers,
+  systemStats,
 };

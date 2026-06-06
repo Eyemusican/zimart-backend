@@ -87,7 +87,14 @@ const placeOrder = async (req, res) => {
   }));
 
   const session = await mongoose.startSession();
-  session.startTransaction();
+  // writeConcern w:'majority' ensures the transaction is committed on the primary
+  // AND at least one secondary before acknowledging — prevents data loss on failover.
+  // readConcern 'snapshot' gives a consistent point-in-time view across all reads
+  // within the transaction, satisfying full ACID isolation.
+  session.startTransaction({
+    writeConcern: { w: 'majority', j: true },
+    readConcern: { level: 'snapshot' },
+  });
 
   try {
     const orderItems  = [];

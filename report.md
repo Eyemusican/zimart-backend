@@ -658,7 +658,21 @@ The next read for that product will miss the cache and repopulate it with the fr
 
 ### 7.4 Cache Stampede Prevention
 
-A cache stampede occurs when many concurrent requests miss the cache simultaneously (e.g., after a TTL expiry or a deliberate invalidation) and all race to populate it, overwhelming the database. ZiMart's current implementation accepts this risk at low traffic levels, where the probability of simultaneous misses on the same key is negligible. At higher scale, a probabilistic early expiration algorithm (PER) or a mutex lock (Redis `SET NX EX` pattern) could be introduced to ensure only one request rebuilds the cache while others wait.
+A cache stampede (thundering-herd problem) occurs when many concurrent requests miss the cache simultaneously — typically because all keys were seeded at the same time and all expire together — and every request races to repopulate the cache from MongoDB, creating a sudden spike in database load.
+
+**ZiMart's solution: Jittered TTL.** Rather than setting every product cache entry to exactly 3600 seconds, the `productTTL()` function adds a ±3 minute random offset at the moment of writing:
+
+```javascript
+const PRODUCT_TTL_BASE = 60 * 60; // 1 hour base
+// ±180 seconds jitter → entries expire between 57 and 63 minutes
+const productTTL = () => PRODUCT_TTL_BASE + Math.floor(Math.random() * 360 - 180);
+
+await redis.set(cacheKey(id), JSON.stringify(product), 'EX', productTTL());
+```
+
+**Why this works:** If 50 products are cached during a seed run, their TTLs are now distributed across a 6-minute window instead of expiring simultaneously. At most, a few products miss the cache in any given second, producing a trickle of MongoDB reads rather than a thundering herd.
+
+**Trade-off:** The jitter introduces up to 3 minutes of additional staleness for some entries beyond the base 1-hour TTL — acceptable for product data. For use cases requiring strict TTL bounds, a Redis `SET NX EX` mutex pattern (only the first requester rebuilds the cache; others wait or serve stale) would be the appropriate escalation.
 
 ---
 
@@ -734,8 +748,32 @@ A cache stampede occurs when many concurrent requests miss the cache simultaneou
 | Startup logging | `MongoDB connected: {host}` and `Redis connected` on startup |
 | `GET /health` endpoint | Returns `{ status: 'ok' }` for load-balancer health checks |
 | `GET /api/routes` endpoint | Introspects the Express router stack and returns all registered method + path combinations |
+| `GET /api/analytics/system-stats` endpoint | Admin-only endpoint that returns live Redis `INFO` metrics (memory usage, cache hit ratio, connected clients, eviction policy, persistence status) and MongoDB connection state |
 | Error propagation | `next(err)` in controllers routes unhandled errors to Express's centralised error handler |
 | Rate limit headers | `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After` on every rate-limited response |
+
+**System stats response example:**
+```json
+{
+  "redis": {
+    "used_memory_human": "1.23M",
+    "connected_clients": "3",
+    "keyspace_hits": "14872",
+    "keyspace_misses": "203",
+    "cache_hit_ratio": "98.66%",
+    "maxmemory_policy": "volatile-ttl",
+    "aof_enabled": "0",
+    "redis_version": "7.2.3"
+  },
+  "mongodb": {
+    "state": "connected",
+    "host": "cluster0-shard-00-00.me0fez6.mongodb.net",
+    "name": "zimart"
+  }
+}
+```
+
+The `cache_hit_ratio` field is derived at request time from `keyspace_hits / (keyspace_hits + keyspace_misses)`, giving operators an instant view of caching effectiveness without querying Redis CLI directly.
 
 ### NFR8 — Data Integrity
 
@@ -821,24 +859,35 @@ Content-Type: application/json
 | GET | `/api/orders` | JWT | List own orders with pagination |
 | GET | `/api/orders/:id` | JWT | Single order detail |
 | PUT | `/api/orders/:id/status` | Admin | Advance order through status state machine |
+| PUT | `/api/orders/:id/cancel` | JWT (customer) | Cancel own order (only while Placed or Confirmed) |
 
 ![alt text](screenshot/postman-order.png)
 
 
 ![alt text](screenshot/postman-order-rate-limit.png)
 
-### 9.5 Analytics (`/api/analytics`)
+### 9.5 User Profile and Wishlist (`/api/auth`)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| PUT | `/api/auth/profile` | JWT | Update name, addresses, payment preferences |
+| POST | `/api/auth/wishlist/:productId` | JWT | Add product to wishlist (`$addToSet`) |
+| DELETE | `/api/auth/wishlist/:productId` | JWT | Remove product from wishlist (`$pull`) |
+
+### 9.6 Analytics (`/api/analytics`)
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/analytics/sales` | Admin | Monthly revenue aggregation pipeline |
+| GET | `/api/analytics/sales/daily?month=YYYY-MM` | Admin | Daily revenue breakdown for a given month |
 | GET | `/api/analytics/top-products` | Admin | Top 10 products by units sold |
 | GET | `/api/analytics/low-stock` | Admin | Products at or below low-stock threshold |
 | GET | `/api/analytics/views-vs-purchases` | Admin | Most-viewed vs most-purchased with conversion rate |
 | GET | `/api/analytics/leaderboard/buyers?month=YYYY-MM` | Admin | Top 10 buyers by spend (Redis Sorted Set) |
 | GET | `/api/analytics/leaderboard/sellers?month=YYYY-MM` | Admin | Top 10 sellers by revenue (Redis Sorted Set) |
+| GET | `/api/analytics/system-stats` | Admin | Live Redis INFO + MongoDB connection status |
 
-### 9.6 System
+### 9.7 System
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -1089,15 +1138,11 @@ MongoDB's built-in `$text` operator supports basic keyword matching but lacks ad
 
 Order status transitions currently produce no side effects beyond the database update. Integrating a message queue (Redis Streams, BullMQ, or Apache Kafka) would decouple order events from notification delivery, enabling email/SMS confirmations, inventory reorder alerts, and real-time order tracking updates without blocking the HTTP response.
 
-### 12.5 Cache Stampede Prevention
-
-As described in Section 7.4, high-traffic deployments risk cache stampedes on popular product pages after a TTL expiry. Implementing the `SET NX EX` mutex pattern or probabilistic early expiration (PER) would prevent thundering-herd behaviour on the MongoDB layer during cache invalidation.
-
-### 12.6 GraphQL API Layer
+### 12.5 GraphQL API Layer
 
 The current REST API requires multiple round trips for complex client views (e.g., fetching a product with its reviews and inventory status). A GraphQL layer would allow clients to declare their data requirements in a single query, reducing over-fetching and under-fetching.
 
-### 12.7 Distributed Tracing
+### 12.6 Distributed Tracing
 
 Production observability currently relies on console logging. Integrating OpenTelemetry with a backend such as Jaeger or Datadog would provide distributed traces across the MongoDB and Redis layers, enabling P99 latency analysis and bottleneck identification.
 

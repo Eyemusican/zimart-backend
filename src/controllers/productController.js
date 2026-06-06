@@ -2,7 +2,10 @@ const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
 const redis = require('../config/redis');
 
-const PRODUCT_TTL = 60 * 60; // 1 hour in seconds
+const PRODUCT_TTL_BASE = 60 * 60; // 1 hour base
+// Jittered TTL prevents cache stampede: if all products cached at the same time,
+// adding ±10% random jitter staggers expiry so they don't all miss simultaneously.
+const productTTL = () => PRODUCT_TTL_BASE + Math.floor(Math.random() * 360 - 180);
 const cacheKey = (id) => `product:${id}`;
 
 // Track unique views (HyperLogLog) and trending score (Sorted Set) for a product.
@@ -120,8 +123,8 @@ const getProductById = async (req, res) => {
       return res.status(404).json({ message: 'Product not found' });
     }
 
-    // Write-through: cache the freshly fetched document for 1 hour.
-    await redis.set(cacheKey(id), JSON.stringify(product), 'EX', PRODUCT_TTL);
+    // Cache with jittered TTL to prevent cache stampede (all entries expiring simultaneously).
+    await redis.set(cacheKey(id), JSON.stringify(product), 'EX', productTTL());
 
     await trackView(id, req);
 
