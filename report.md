@@ -33,7 +33,7 @@
 
 ## 1. Abstract
 
-ZiMart is a RESTful e-commerce backend built to demonstrate the practical application of polyglot persistence — the use of multiple specialised database technologies within a single system. The system pairs MongoDB Atlas, a distributed document-oriented database, with Redis Cloud, an in-memory data store, to serve distinct workloads efficiently. MongoDB handles durable, schema-flexible document storage across six collections (User, Product, Category, Order, Review, and Inventory), while Redis accelerates read-heavy paths through caching, manages short-lived session state, enforces rate limits, tracks trending products and buyer/seller leaderboards via sorted sets, counts unique visitors via HyperLogLog, and records recently viewed items via lists. The backend is implemented in Node.js with Express 5, exposes twenty-eight REST endpoints across five routers, and enforces JWT-based authentication with Redis-backed session revocation. Guest cart support is implemented via an optional-auth middleware that accepts a client-generated session identifier without requiring login. Advanced MongoDB features — compound indexes, full-text search, multi-document ACID transactions, and aggregation pipelines — are demonstrated through real product and order workflows. A sharding plan with justified shard keys and an in-depth read/write concern analysis are provided for production scalability. Redis high-availability configuration (Sentinel and Cluster) is documented with ioredis code examples. Performance is validated with Apache Bench cache-hit benchmarks and MongoDB `explain()` query profiling output.
+ZiMart is a RESTful e-commerce backend built to demonstrate the practical application of polyglot persistence — the use of multiple specialised database technologies within a single system. The system pairs MongoDB Atlas, a distributed document-oriented database, with Redis Cloud, an in-memory data store, to serve distinct workloads efficiently. MongoDB handles durable, schema-flexible document storage across six collections (User, Product, Category, Order, Review, and Inventory), while Redis accelerates read-heavy paths through caching, manages short-lived session state, enforces rate limits, tracks trending products and buyer/seller leaderboards via sorted sets, counts unique visitors via HyperLogLog, and records recently viewed items via lists. The backend is implemented in Node.js with Express 5, exposes forty REST endpoints across seven routers, and enforces JWT-based authentication with Redis-backed session revocation. Guest cart support is implemented via an optional-auth middleware that accepts a client-generated session identifier without requiring login. Advanced MongoDB features — compound indexes, full-text search, multi-document ACID transactions, and aggregation pipelines — are demonstrated through real product and order workflows. A sharding plan with justified shard keys and an in-depth read/write concern analysis are provided for production scalability. Redis high-availability configuration (Sentinel and Cluster) is documented with ioredis code examples. Performance is validated with Apache Bench cache-hit benchmarks and MongoDB `explain()` query profiling output.
 
 ---
 
@@ -506,22 +506,15 @@ if (count > limit) {
 
 ### 6.2 Redis Persistence Configuration
 
-ZiMart uses Redis Cloud which configures **RDB (Redis Database) persistence** by default. RDB creates point-in-time snapshots of the dataset at specified intervals, providing durability with minimal performance overhead compared to AOF (Append Only File).
+ZiMart targets a **hybrid RDB + AOF** persistence configuration. RDB (Redis Database Backup) creates compact point-in-time binary snapshots at configured intervals; AOF (Append Only File) logs every write operation to disk. Enabling both simultaneously gives the best of both modes: fast startup from the RDB snapshot and high durability from the AOF filling the gap since the last snapshot.
 
-**Justification for RDB over AOF:**
-- ZiMart's Redis data (sessions, cache, leaderboard) is semi-ephemeral — losing a few minutes of data on crash is acceptable
-- RDB snapshots are compact and restore faster than AOF logs
-- AOF would add write overhead on every Redis operation, impacting rate limiting and cache performance
+**Justification for hybrid over RDB alone:** With RDB-only persistence, a Redis crash between two snapshot intervals loses all writes since the previous snapshot — potentially several minutes of session, cart, and leaderboard data. The AOF eliminates this gap: every write is appended to the log so on recovery only the short AOF tail since the last snapshot is replayed, not the full AOF from the beginning. The `aof-use-rdb-preamble yes` flag enables true hybrid mode, where the AOF file begins with a compact RDB snapshot followed by incremental AOF commands — combining fast load times with near-zero data loss.
 
 ### 6.3 Redis Eviction Policy
 
-Redis Cloud is configured with **`volatile-ttl`** eviction policy.
+Redis Cloud is configured with the **`allkeys-lru`** (Least Recently Used) eviction policy. When Redis reaches its `maxmemory` limit, it evicts the least recently used key across the entire keyspace, regardless of whether that key has a TTL set.
 
-**Justification:**
-- ZiMart sets TTL on all keys (sessions, cache, cart, rate limits)
-- `volatile-ttl` evicts keys with the shortest remaining TTL first when memory is full
-- This naturally removes the least relevant cached data first
-- Rate limit keys (60s TTL) expire before session keys (7 days TTL) — correct priority
+**Justification:** Every key in ZiMart's Redis keyspace is either cache data (product documents, recently viewed lists) or operational data (sessions, carts, leaderboards, rate limit counters). No key is permanently irreplaceable: sessions can be re-established via re-login, cached product documents can be repopulated from MongoDB, and carts have a natural 7-day TTL. Since all data is safely recoverable or naturally ephemeral, evicting any key under memory pressure is safe. `allkeys-lru` preferentially retains the most actively used keys — hot product caches, active sessions — and evicts cold or stale entries first, which matches ZiMart's access pattern. Unlike `volatile-ttl` or `volatile-lru`, `allkeys-lru` also covers keys without a TTL (e.g., `trending:products`), ensuring no key category is exempt from eviction under memory pressure.
 
 ### 6.4 Redis High Availability — Sentinel and Cluster Configuration
 
@@ -698,6 +691,19 @@ await redis.set(cacheKey(id), JSON.stringify(product), 'EX', productTTL());
 | Separate Inventory collection | Inventory stock decrements are isolated from the large Product document, reducing write contention during high-order volume |
 | Leaderboard via Redis Sorted Set | Buyer/seller leaderboards are updated in O(log N) without any aggregation pipeline on the hot write path |
 
+#### NFR2.1 — MongoDB Sharding Plan
+
+Although Atlas M0 (free tier) does not support sharding, the following shard key strategy is designed for a production-scale deployment. This is a theoretical design — the keys are chosen to prevent hot spots (one shard absorbing all writes) and scatter-gather queries (every shard consulted for every read).
+
+| Collection | Shard Key | Strategy | Justification |
+|---|---|---|---|
+| **users** | `{ _id: "hashed" }` (userId) | Hash-based | User lookups are always by `_id` (userId). Hashing distributes documents uniformly across shards with no range skew. No range queries on `_id` exist in ZiMart, so hash routing is the correct choice. |
+| **products** | `{ category: 1, _id: 1 }` | Compound range | The dominant read pattern filters by `category` first (`GET /api/products?category=...`). Placing `category` as the leading key routes those queries to the shard(s) owning that category's range, avoiding scatter-gather. `_id` is appended to guarantee key uniqueness and enables zone sharding (high-traffic categories such as Electronics can be pinned to faster shards). |
+| **orders** | `{ userId: 1, createdAt: 1 }` | Compound range | The dominant read pattern is "my orders" — filtered by `userId`. Co-locating all of a user's orders on one shard eliminates scatter-gather for the order history page. `createdAt` as the second key prevents a monotonic-write hot spot: new orders are distributed across users rather than always landing on the shard with the highest `userId` range. |
+| **inventory** | `{ productId: "hashed" }` | Hash-based | Inventory writes are uniformly distributed across products (no single product generates dramatically more writes than others). Hashing prevents one shard from absorbing all stock-decrement writes during a flash sale. Inventory is always looked up by `productId` (point query), so hash routing incurs no extra cost. |
+
+> Full sharding plan including `reviews` and `categories` is documented in Section 5.5.
+
 ### NFR3 — High Availability
 
 | Mechanism | Implementation |
@@ -707,6 +713,39 @@ await redis.set(cacheKey(id), JSON.stringify(product), 'EX', productTTL());
 | Redis ioredis reconnection | ioredis automatically reconnects on connection loss with exponential backoff |
 | Rate limiter fail-open | If Redis is unavailable, the rate limiter calls `next()` immediately, preventing Redis downtime from blocking all requests |
 | Graceful startup | `connectDB()` calls `process.exit(1)` on MongoDB connection failure, preventing a zombie server that accepts requests it cannot serve |
+
+#### NFR3.1 — Redis Sentinel Configuration
+
+Redis Sentinel provides automatic primary election, failure detection, and client notification for self-hosted Redis deployments. ZiMart's theoretical Sentinel topology uses **1 primary, 2 replicas, and 3 Sentinel nodes** — the minimum recommended configuration for a reliable quorum.
+
+| Node | Role | Port |
+|---|---|---|
+| `redis-primary` | Primary — accepts all writes | 6379 |
+| `redis-replica-1` | Replica — read-only, replicates from primary | 6380 |
+| `redis-replica-2` | Replica — read-only, replicates from primary | 6381 |
+| `sentinel-1` | Sentinel monitor | 26379 |
+| `sentinel-2` | Sentinel monitor | 26379 |
+| `sentinel-3` | Sentinel monitor | 26379 |
+
+The quorum is set to `2`: at least 2 of the 3 Sentinel nodes must independently agree the primary is unreachable before a failover election is initiated. With 3 Sentinel nodes the system tolerates 1 Sentinel failure while still achieving quorum, preventing split-brain scenarios.
+
+**ioredis supports Sentinel natively** — no additional client library or proxy is required:
+
+```javascript
+// src/config/redis.js — Sentinel configuration (self-hosted production)
+const redis = new Redis({
+  sentinels: [
+    { host: 'sentinel-1.zimart.internal', port: 26379 },
+    { host: 'sentinel-2.zimart.internal', port: 26379 },
+    { host: 'sentinel-3.zimart.internal', port: 26379 },
+  ],
+  name: 'mymaster',            // must match: sentinel monitor mymaster ...
+  password: process.env.REDIS_PASSWORD,
+  sentinelPassword: process.env.REDIS_SENTINEL_PASSWORD,
+});
+```
+
+On primary failure, ioredis receives a `+switch-master` event from the Sentinels and transparently reconnects all pending and future commands to the newly elected primary — no application restart or manual intervention is required. This is a theoretical design; ZiMart uses Redis Cloud, which provisions an equivalent managed failover with the same guarantees.
 
 ### NFR4 — Consistency
 
@@ -720,6 +759,24 @@ await redis.set(cacheKey(id), JSON.stringify(product), 'EX', productTTL());
 | Compound unique index | `(userId, productId)` on Review enforces one-review-per-user at the database level, not just application level |
 | CAP theorem positioning | ZiMart chooses CP (Consistency + Partition Tolerance); see Section 5.5 for full discussion |
 
+#### NFR4.1 — Redis Eviction Policy
+
+ZiMart configures Redis with the **`allkeys-lru`** (Least Recently Used) eviction policy. When Redis reaches its `maxmemory` limit, it evicts the least recently used key across the entire keyspace — regardless of whether that key has a TTL set.
+
+**Justification:** Every key in ZiMart's Redis keyspace is either cache data (product documents, recently viewed lists) or operational data (sessions, carts, leaderboards, rate limit counters). No key is permanently irreplaceable: sessions can be re-established via re-login, cached product documents can be repopulated from MongoDB, and carts have a natural 7-day TTL. Since all data is safely recoverable or naturally ephemeral, evicting any key under memory pressure is safe. `allkeys-lru` preferentially retains the most actively used keys — hot product caches, active user sessions — and evicts cold or stale entries first, which matches ZiMart's access pattern.
+
+```
+# Redis configuration
+maxmemory-policy allkeys-lru
+```
+
+| Policy | Behaviour | Suitability for ZiMart |
+|---|---|---|
+| `noeviction` | Returns errors when memory is full | Unacceptable — would break all writes under memory pressure |
+| `volatile-ttl` | Evicts only keys with a TTL; evicts shortest-TTL first | Partial — keys without TTL (e.g., `trending:products`) would never be evicted |
+| `volatile-lru` | Evicts LRU keys, but only from those with a TTL set | Partial — same gap as `volatile-ttl` for non-TTL keys |
+| **`allkeys-lru`** | **Evicts LRU keys across the entire keyspace** | **Correct — all keys are semi-ephemeral; cold data is safely removed first** |
+
 ### NFR5 — Durability
 
 | Mechanism | Implementation |
@@ -727,6 +784,36 @@ await redis.set(cacheKey(id), JSON.stringify(product), 'EX', productTTL());
 | MongoDB write concern | Atlas default write concern is `majority` — writes are acknowledged only after replication to a majority of nodes [6] |
 | Embedded order snapshots | Order items embed name and price at purchase time, preserving the historical record even if the product is later updated or deleted |
 | Transaction commit before cart clear | `DEL cart:{userId}` executes only after `session.commitTransaction()` succeeds; a process crash between commit and cart clear leaves an orphaned cart that expires via its 7-day TTL |
+
+#### NFR5.1 — Redis RDB + AOF Hybrid Persistence
+
+Redis supports two persistence mechanisms: **RDB (Redis Database Backup)** creates point-in-time binary snapshots at configured intervals, and **AOF (Append Only File)** logs every write operation to disk, enabling recovery to the last written command. ZiMart targets a hybrid configuration that enables both simultaneously.
+
+**Why hybrid over RDB alone:**
+
+| Mode | Durability | Recovery Speed | Disk Usage |
+|---|---|---|---|
+| RDB only | Data loss between snapshots (up to the last save interval, potentially minutes) | Fast — compact binary format | Low |
+| AOF only | Near-zero data loss (last `fsync`, typically 1 second) | Slow on large datasets — replays every command from the beginning | High |
+| **RDB + AOF (hybrid)** | **AOF fills gaps between RDB snapshots — minimal data loss window** | **Fast — RDB base snapshot loaded first, only a short AOF tail is replayed** | Moderate |
+
+With RDB-only persistence, a Redis crash between two snapshot intervals loses all writes since the previous snapshot. The AOF eliminates this gap: every write is appended to the log so recovery replays only the commands issued since the last RDB snapshot rather than the full AOF history from the start. Startup time remains fast because the binary RDB snapshot is loaded first, and only the short AOF tail accumulated since that snapshot needs to be replayed.
+
+**Redis Cloud default persistence configuration (equivalent):**
+
+```
+# RDB snapshots
+save 900 1        # snapshot if >= 1 key changed in 900 s
+save 300 10       # snapshot if >= 10 keys changed in 300 s
+save 60 10000     # snapshot if >= 10000 keys changed in 60 s
+
+# AOF
+appendonly yes
+appendfsync everysec    # fsync once per second — balance between durability and write performance
+aof-use-rdb-preamble yes  # hybrid mode: AOF file begins with a compact RDB snapshot, AOF commands follow
+```
+
+The `aof-use-rdb-preamble yes` flag activates true hybrid persistence: the AOF file is structured as an RDB snapshot followed by the AOF command log accumulated since that snapshot. This gives both fast load times (binary RDB portion parsed at startup) and high durability (AOF tail captures all writes since the last snapshot). Redis Cloud enables hybrid persistence by default on all paid tiers; the free tier uses RDB snapshots only, which is acceptable for ZiMart's semi-ephemeral Redis workload.
 
 ### NFR6 — Security
 
@@ -761,7 +848,7 @@ await redis.set(cacheKey(id), JSON.stringify(product), 'EX', productTTL());
     "keyspace_hits": "14872",
     "keyspace_misses": "203",
     "cache_hit_ratio": "98.66%",
-    "maxmemory_policy": "volatile-ttl",
+    "maxmemory_policy": "allkeys-lru",
     "aof_enabled": "0",
     "redis_version": "7.2.3"
   },
